@@ -6,7 +6,7 @@ import json
 import requests
 
 from datetime import date
-from enum import Enum
+from enum import Enum, auto
 
 import numpy as np
 import pandas as pd
@@ -40,6 +40,10 @@ class Sign(Enum):
     ZERO = 0
     POSITIVE = 1
 
+class Action(Enum):
+    OPEN = auto()
+    CLOSE = auto()
+
 def zero_crossing(data):
     signs = []
     for x in data:
@@ -70,13 +74,27 @@ def zero_crossing(data):
         if l != Sign.ZERO:
             last_nonzero = l
 
-    print(crosspoints)
     return crosspoints
 
-def calculate_crosspoints(df, temperature):
+def calculate_crosspoints(df, temperature, cooling):
     zeroed_temperature = df['temperature'] - temperature
-    print(zeroed_temperature)
-    return zero_crossing(zeroed_temperature)
+    crossings = zero_crossing(zeroed_temperature)
+    if cooling:
+        def window_func(crossing):
+            if crossing == Sign.POSITIVE:
+                return Action.CLOSE
+            else:
+                return Action.OPEN
+    else:
+        def window_func(crossing):
+            if crossing == Sign.NEGATIVE:
+                return Action.CLOSE
+            else:
+                return Action.OPEN
+
+    return [(x[0], window_func(x[1])) for x in crossings]
+
+
 
 def build_dataframe(json_data):
     columns = (
@@ -105,12 +123,58 @@ def build_dataframe(json_data):
 
     return pd.DataFrame(data, index=timestamps)
 
+def build_crosspoints(df, min_temperature, max_temperature):
+    mean_temp = df['temperature'].mean()
+    crosspoints = []
+
+    if mean_temp > min_temperature:
+        crosspoints.extend(calculate_crosspoints(df, max_temperature, True))
+    if mean_temp < max_temperature:
+        crosspoints.extend(calculate_crosspoints(df, min_temperature, False))
+    crosspoints.sort(key=lambda x: x[0])
+    return crosspoints
+
+def assume_start(df, min_temperature, max_temperature):
+    if df['temperature'].empty:
+        return Action.CLOSE
+
+    if df['temperature'][0] > max_temperature:
+        return Action.CLOSE
+    if df['temperature'][0] < min_temperature:
+        return Action.CLOSE
+    return Action.OPEN
+
+def print_actions(date, assumed_start, crosspoints):
+    local_tz = get_localzone()
+    print(f'On {date}: (all times are in {local_tz} time)')
+    if assumed_start == Action.CLOSE:
+        print('Assuming window starts closed.')
+    else:
+        print('Assuming window starts opened.')
+
+    if not crosspoints:
+        print('There is nothing to do.')
+
+
+    for crosspoint in crosspoints:
+        if crosspoint[1] == Action.OPEN:
+            action = 'open the window.'
+        else:
+            action = 'close the window.'
+        local_time = crosspoint[0].to_pydatetime().astimezone(local_tz).strftime("%H:%M")
+
+        print(f'Around {local_time} {action}')
+
+
 
 def main(args):
     data = make_api_request(args.url, args.date, args.lat, args.lon)
     df = build_dataframe(data)
-    calculate_crosspoints(df, args.min_temperature)
-    calculate_crosspoints(df, args.max_temperature)
+
+    assumed_start = assume_start(df, args.min_temperature, args.max_temperature)
+    crosspoints = build_crosspoints(df, args.min_temperature, args.max_temperature)
+
+    print_actions(args.date, assumed_start, crosspoints)
 
 
 if __name__ == '__main__':
